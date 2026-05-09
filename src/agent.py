@@ -4,7 +4,7 @@ from pydantic import BaseModel
 from langchain_ollama import OllamaLLM
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
-from langchain.sql_database import SQLDatabase
+from langchain_community.utilities.sql_database import SQLDatabase
 from dotenv import load_dotenv
 
 load_dotenv()
