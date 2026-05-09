@@ -1,8 +1,9 @@
-fastapi==0.115.11
-uvicorn==0.34.2
-sqlalchemy==2.0.39
-pymysql==1.1.1
-python-dotenv==1.0.1
+fastapi
+uvicorn
+sqlalchemy
+pymysql
+python-dotenv
 langchain>=0.3.24
 langchain-ollama>=0.2.3
 langchain-community>=0.3.23
+langgraph>=0.2.0
