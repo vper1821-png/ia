@@ -1,6 +1,8 @@
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 from langchain_ollama import OllamaLLM
 from langchain_community.agent_toolkits import create_sql_agent
 from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
@@ -11,54 +13,48 @@ load_dotenv()
 
 app = FastAPI()
 
-# Leer y limpiar variables de entorno
-def get_env(name: str, default: str = ""):
+# ========== CONFIGURACIÓN ==========
+def get_env(name: str, default: str = "") -> str:
+    """Obtiene variable de entorno y elimina espacios/saltos de línea."""
     val = os.getenv(name, default)
-    if val:
-        val = val.strip()
-    return val
+    return val.strip() if val else ""
 
-db_user = (os.getenv("MYSQL_USER") or "").strip()
-db_password = (os.getenv("MYSQL_PASSWORD") or "").strip()
-db_host = (os.getenv("MYSQL_HOST") or "").strip()
-db_port = (os.getenv("MYSQL_PORT") or "3306").strip()
-db_name = (os.getenv("MYSQL_DATABASE") or "").strip()
+db_host = get_env("MYSQL_HOST", "10.110.77.145")   # ClusterIP del servicio
+db_port = get_env("MYSQL_PORT", "3306")
+db_user = get_env("MYSQL_USER", "invisia")
+db_password = get_env("MYSQL_PASSWORD", "Vper1821317@")
+db_name = get_env("MYSQL_DATABASE", "invisia_db")
 
-print(f"DEBUG: MYSQL_USER='{db_user}' (len={len(db_user)})")
-print(f"DEBUG: MYSQL_HOST='{db_host}'")
-print(f"DEBUG: MYSQL_DATABASE='{db_name}'")
-if not db_user:
-    print("ERROR: MYSQL_USER está vacío")
-    raise ValueError("MYSQL_USER no puede estar vacío")
 ollama_host = get_env("OLLAMA_HOST", "ollama-phi3.ia.svc.cluster.local")
 ollama_port = get_env("OLLAMA_PORT", "11434")
 
-# Validar que todas las variables de BD estén presentes
+# Validación de variables obligatorias
 missing = []
+if not db_host: missing.append("MYSQL_HOST")
 if not db_user: missing.append("MYSQL_USER")
 if not db_password: missing.append("MYSQL_PASSWORD")
-if not db_host: missing.append("MYSQL_HOST")
 if not db_name: missing.append("MYSQL_DATABASE")
 if missing:
-    error_msg = f"Faltan variables de entorno: {', '.join(missing)}"
-    print(error_msg)
-    raise ValueError(error_msg)
+    raise ValueError(f"Faltan variables de entorno: {', '.join(missing)}")
 
-# Construir URL de conexión
+# ========== CONEXIÓN A MYSQL (ProxySQL) ==========
 db_url = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-# Mostrar URL ocultando la contraseña para depuración
-masked_url = f"mysql+pymysql://{db_user}:***@{db_host}:{db_port}/{db_name}"
-print(f"Conectando a BD: {masked_url}")
+print(f"Conectando a BD: mysql+pymysql://{db_user}:***@{db_host}:{db_port}/{db_name}")
 
-# Conectar a la base de datos
 try:
-    db = SQLDatabase.from_uri(db_url)
-    print("Conexión a BD exitosa.")
-except Exception as e:
-    print(f"Error conectando a BD: {e}")
+    engine = create_engine(db_url, pool_pre_ping=True)
+    # Prueba de conexión simple
+    with engine.connect() as conn:
+        conn.execute(text("SELECT 1"))
+    print("✅ Conexión a BD exitosa.")
+except SQLAlchemyError as e:
+    print(f"❌ Error conectando a BD: {e}")
     raise
 
-# Conectar a Ollama
+# Crear objeto SQLDatabase para LangChain
+db = SQLDatabase(engine)
+
+# ========== CONEXIÓN A OLLAMA ==========
 llm = OllamaLLM(
     model="phi3:mini",
     base_url=f"http://{ollama_host}:{ollama_port}",
@@ -66,6 +62,7 @@ llm = OllamaLLM(
     num_predict=256
 )
 
+# ========== AGENTE TEXT-TO-SQL ==========
 toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 agent = create_sql_agent(
     llm=llm,
@@ -75,6 +72,7 @@ agent = create_sql_agent(
     max_iterations=5
 )
 
+# ========== API ENDPOINTS ==========
 class Query(BaseModel):
     query: str
 
@@ -89,3 +87,7 @@ async def generate_sql(query: Query):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8080)
