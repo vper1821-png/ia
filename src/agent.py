@@ -18,11 +18,18 @@ def get_env(name: str, default: str = ""):
         val = val.strip()
     return val
 
-db_user = get_env("MYSQL_USER")
-db_password = get_env("MYSQL_PASSWORD")
-db_host = get_env("MYSQL_HOST")
-db_port = get_env("MYSQL_PORT", "3306")
-db_name = get_env("MYSQL_DATABASE")
+db_user = (os.getenv("MYSQL_USER") or "").strip()
+db_password = (os.getenv("MYSQL_PASSWORD") or "").strip()
+db_host = (os.getenv("MYSQL_HOST") or "").strip()
+db_port = (os.getenv("MYSQL_PORT") or "3306").strip()
+db_name = (os.getenv("MYSQL_DATABASE") or "").strip()
+
+print(f"DEBUG: MYSQL_USER='{db_user}' (len={len(db_user)})")
+print(f"DEBUG: MYSQL_HOST='{db_host}'")
+print(f"DEBUG: MYSQL_DATABASE='{db_name}'")
+if not db_user:
+    print("ERROR: MYSQL_USER está vacío")
+    raise ValueError("MYSQL_USER no puede estar vacío")
 ollama_host = get_env("OLLAMA_HOST", "ollama-phi3.ia.svc.cluster.local")
 ollama_port = get_env("OLLAMA_PORT", "11434")
 
