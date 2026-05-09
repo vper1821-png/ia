@@ -1,0 +1,57 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: text2sql-agent
+  namespace: ia
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: text2sql-agent
+  template:
+    metadata:
+      labels:
+        app: text2sql-agent
+    spec:
+      containers:
+      - name: agent
+        image: ghcr.io/TU_USUARIO/ia/text2sql-agent:main   # Cambia TU_USUARIO
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+        env:
+        - name: MYSQL_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: text2sql-config
+              key: MYSQL_HOST
+        - name: MYSQL_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: text2sql-config
+              key: MYSQL_PORT
+        - name: MYSQL_DATABASE
+          valueFrom:
+            configMapKeyRef:
+              name: text2sql-config
+              key: MYSQL_DATABASE
+        - name: MYSQL_USER
+          valueFrom:
+            configMapKeyRef:
+              name: text2sql-config
+              key: MYSQL_USER
+        - name: MYSQL_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-wms-secret
+              key: password
+        - name: OLLAMA_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: text2sql-config
+              key: OLLAMA_HOST
+        - name: OLLAMA_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: text2sql-config
+              key: OLLAMA_PORT
