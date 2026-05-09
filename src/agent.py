@@ -18,6 +18,61 @@ app = FastAPI()
 # ── PRUEBA: solo 2 tablas ────────────────────────────────────────────────────
 TEST_TABLES = ["apis_logs", "stock_wms"]
 
+# ── Keywords que indican consulta a la BD ────────────────────────────────────
+DB_KEYWORDS = [
+    "cuanto", "cuantos", "cuanta", "cuantas",
+    "stock", "api", "registro", "registros",
+    "total", "lista", "dame", "muestra", "muéstrame",
+    "hay", "tiene", "tienen", "existe", "existen",
+    "ultimo", "último", "primera", "primero",
+    "logs", "log", "apis_logs", "stock_wms",
+    "consulta", "busca", "encuentra", "filtra",
+    "mayor", "menor", "maximo", "minimo", "promedio",
+    "contar", "listar", "mostrar",
+]
+
+GREETINGS = [
+    "hola", "hello", "hi", "buenas", "buenos", "buen dia",
+    "buen día", "buenas tardes", "buenas noches", "que tal",
+    "cómo estás", "como estas", "hey",
+]
+
+GREETING_RESPONSE = (
+    "¡Hola! Soy el asistente WMS. Puedo consultarte información sobre:\n"
+    "- 📊 **apis_logs**: registros de llamadas a la API\n"
+    "- 📦 **stock_wms**: stock actual del almacén\n\n"
+    "Ejemplos de preguntas:\n"
+    "• _¿Cuántos registros hay en apis_logs?_\n"
+    "• _¿Cuánto stock hay en total?_\n"
+    "• _¿Cuáles son los últimos 5 registros de apis_logs?_"
+)
+
+OFF_TOPIC_RESPONSE = (
+    "Solo puedo responder preguntas sobre la base de datos WMS. "
+    "Preguntame sobre **apis_logs** o **stock_wms**. "
+    "Por ejemplo: _¿Cuántos registros hay en apis_logs?_"
+)
+
+
+def is_db_question(question: str) -> bool:
+    """Determina si la pregunta requiere consultar la BD."""
+    q = question.lower().strip()
+    # Es saludo
+    if any(g in q for g in GREETINGS) and len(q.split()) <= 5:
+        return False
+    # Tiene keyword de BD
+    if any(kw in q for kw in DB_KEYWORDS):
+        return True
+    # Pregunta larga probablemente es de BD
+    if len(q.split()) >= 4:
+        return True
+    return False
+
+
+def is_greeting(question: str) -> bool:
+    q = question.lower().strip()
+    return any(g in q for g in GREETINGS) and len(q.split()) <= 6
+
 
 def clean_env_var(value: str, var_name: str) -> str:
     if not value:
@@ -92,10 +147,8 @@ def extract_sql(raw: str) -> str:
 
 def clean_answer(raw: str) -> str:
     """Corta la respuesta en el primer bloque de basura que genera phi3."""
-    # Parar en doble salto de línea (phi3 sigue inventando después)
     if '\n\n' in raw:
         raw = raw[:raw.index('\n\n')]
-    # Parar en señales de que phi3 empezó a alucinar
     stop_signals = ['##', 'Question:', 'Note:', 'Explanation:', 'Example:', '```']
     for signal in stop_signals:
         if signal in raw:
@@ -112,6 +165,17 @@ class Query(BaseModel):
 async def generate_sql(query: Query):
     print(f"\n{'='*50}")
     print(f"📥 Pregunta: {query.query}")
+
+    # ── Respuesta directa sin tocar la BD ────────────────────────────────────
+    if is_greeting(query.query):
+        print("👋 Detectado saludo")
+        return {"response": GREETING_RESPONSE}
+
+    if not is_db_question(query.query):
+        print("❓ Pregunta fuera de contexto")
+        return {"response": OFF_TOPIC_RESPONSE}
+
+    # ── Consulta a la BD ──────────────────────────────────────────────────────
     try:
         # Paso 1 — generar SQL
         sql_prompt = (
