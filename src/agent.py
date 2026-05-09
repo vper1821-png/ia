@@ -1,4 +1,5 @@
 import os
+import re
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import create_engine, text
@@ -13,48 +14,80 @@ load_dotenv()
 
 app = FastAPI()
 
-# ========== CONFIGURACIÓN ==========
-def get_env(name: str, default: str = "") -> str:
-    """Obtiene variable de entorno y elimina espacios/saltos de línea."""
-    val = os.getenv(name, default)
-    return val.strip() if val else ""
+def clean_env_var(value: str, var_name: str) -> str:
+    """Limpia caracteres no imprimibles y espacios alrededor."""
+    if not value:
+        return ""
+    # Eliminar cualquier carácter que no sea letra, dígito, punto, dos puntos o guión
+    cleaned = re.sub(r'[^\w\.:-]', '', value)
+    # También eliminar posibles retornos de carro y saltos de línea
+    cleaned = cleaned.replace('\r', '').replace('\n', '').strip()
+    if cleaned != value:
+        print(f"!! Variable {var_name} fue limpiada: original='{value}' -> limpia='{cleaned}'")
+    return cleaned
 
-db_host = get_env("MYSQL_HOST", "10.110.77.145")   # ClusterIP del servicio
-db_port = get_env("MYSQL_PORT", "3306")
-db_user = get_env("MYSQL_USER", "invisia")
-db_password = get_env("MYSQL_PASSWORD", "Vper1821317@")
-db_name = get_env("MYSQL_DATABASE", "invisia_db")
+# Obtener variables
+db_host_raw = os.getenv("MYSQL_HOST", "10.110.77.145")
+db_host = clean_env_var(db_host_raw, "MYSQL_HOST")
 
-ollama_host = get_env("OLLAMA_HOST", "ollama-phi3.ia.svc.cluster.local")
-ollama_port = get_env("OLLAMA_PORT", "11434")
+db_port_raw = os.getenv("MYSQL_PORT", "3306")
+db_port = clean_env_var(db_port_raw, "MYSQL_PORT")
 
-# Validación de variables obligatorias
+db_user_raw = os.getenv("MYSQL_USER", "invisia")
+db_user = clean_env_var(db_user_raw, "MYSQL_USER")
+
+db_password_raw = os.getenv("MYSQL_PASSWORD", "Vper1821317@")
+db_password = clean_env_var(db_password_raw, "MYSQL_PASSWORD")
+
+db_name_raw = os.getenv("MYSQL_DATABASE", "invisia_db")
+db_name = clean_env_var(db_name_raw, "MYSQL_DATABASE")
+
+ollama_host_raw = os.getenv("OLLAMA_HOST", "ollama-phi3.ia.svc.cluster.local")
+ollama_host = clean_env_var(ollama_host_raw, "OLLAMA_HOST")
+ollama_port_raw = os.getenv("OLLAMA_PORT", "11434")
+ollama_port = clean_env_var(ollama_port_raw, "OLLAMA_PORT")
+
+# Validación
 missing = []
 if not db_host: missing.append("MYSQL_HOST")
+if not db_port: missing.append("MYSQL_PORT")
 if not db_user: missing.append("MYSQL_USER")
 if not db_password: missing.append("MYSQL_PASSWORD")
 if not db_name: missing.append("MYSQL_DATABASE")
 if missing:
     raise ValueError(f"Faltan variables de entorno: {', '.join(missing)}")
 
-# ========== CONEXIÓN A MYSQL (ProxySQL) ==========
-db_url = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
-print(f"Conectando a BD: mysql+pymysql://{db_user}:***@{db_host}:{db_port}/{db_name}")
+print(f"DEBUG: MYSQL_HOST='{db_host}' (len={len(db_host)})")
+print(f"DEBUG: MYSQL_HOST raw chars: {[hex(ord(c)) for c in db_host]}")
+
+# Construir URL usando nombre DNS (más robusto)
+# Si se prefiere IP, usar db_host; pero intentemos antes con el nombre DNS del servicio de Kubernetes
+dns_host = "invisia-pxc-proxysql.database.svc.cluster.local"
+db_url = f"mysql+pymysql://{db_user}:{db_password}@{dns_host}:{db_port}/{db_name}"
+print(f"Conectando a BD (DNS): mysql+pymysql://{db_user}:***@{dns_host}:{db_port}/{db_name}")
 
 try:
     engine = create_engine(db_url, pool_pre_ping=True)
-    # Prueba de conexión simple
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
-    print("✅ Conexión a BD exitosa.")
-except SQLAlchemyError as e:
-    print(f"❌ Error conectando a BD: {e}")
-    raise
+    print("✅ Conexión a BD exitosa (usando DNS).")
+except Exception as e1:
+    print(f"❌ Falló conexión con DNS: {e1}")
+    # Segunda opción: usar la IP limpia
+    db_url_ip = f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}"
+    print(f"Conectando a BD (IP): mysql+pymysql://{db_user}:***@{db_host}:{db_port}/{db_name}")
+    try:
+        engine = create_engine(db_url_ip, pool_pre_ping=True)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        print("✅ Conexión a BD exitosa (usando IP).")
+    except Exception as e2:
+        print(f"❌ Error definitivo conectando a BD: {e2}")
+        raise
 
-# Crear objeto SQLDatabase para LangChain
 db = SQLDatabase(engine)
 
-# ========== CONEXIÓN A OLLAMA ==========
+# Ollama y agente (sin cambios relevantes)
 llm = OllamaLLM(
     model="phi3:mini",
     base_url=f"http://{ollama_host}:{ollama_port}",
@@ -62,7 +95,6 @@ llm = OllamaLLM(
     num_predict=256
 )
 
-# ========== AGENTE TEXT-TO-SQL ==========
 toolkit = SQLDatabaseToolkit(db=db, llm=llm)
 agent = create_sql_agent(
     llm=llm,
@@ -72,7 +104,6 @@ agent = create_sql_agent(
     max_iterations=5
 )
 
-# ========== API ENDPOINTS ==========
 class Query(BaseModel):
     query: str
 
