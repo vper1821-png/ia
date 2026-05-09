@@ -2,8 +2,8 @@ import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from langchain_ollama import OllamaLLM
-from langchain.agents import create_sql_agent
-from langchain.agents.agent_toolkits import SQLDatabaseToolkit
+from langchain_community.agent_toolkits import create_sql_agent
+from langchain_community.agent_toolkits.sql.toolkit import SQLDatabaseToolkit
 from langchain.sql_database import SQLDatabase
 from dotenv import load_dotenv
 
@@ -54,7 +54,3 @@ async def generate_sql(query: Query):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
