@@ -15,8 +15,9 @@ load_dotenv()
 
 app = FastAPI()
 
-# ── PRUEBA: solo 2 tablas para minimizar tokens ──────────────────────────────
+# ── PRUEBA: solo 2 tablas ────────────────────────────────────────────────────
 TEST_TABLES = ["apis_logs", "stock_wms"]
+
 
 def clean_env_var(value: str, var_name: str) -> str:
     if not value:
@@ -25,6 +26,7 @@ def clean_env_var(value: str, var_name: str) -> str:
     if cleaned != value:
         print(f"!! Variable {var_name} fue limpiada")
     return cleaned
+
 
 # ── Variables ────────────────────────────────────────────────────────────────
 db_host     = clean_env_var(os.getenv("MYSQL_HOST",     "10.110.77.145"),                    "MYSQL_HOST")
@@ -58,7 +60,7 @@ except SQLAlchemyError as e:
 
 db = SQLDatabase(engine, include_tables=TEST_TABLES)
 
-# Schema fijo — se calcula una vez al arrancar para no repetirlo en cada request
+# Schema fijo — se calcula una vez al arrancar
 SCHEMA = db.get_table_info(TEST_TABLES)
 print(f"📋 Schema cargado para tablas: {TEST_TABLES}")
 print(f"📏 Longitud schema: {len(SCHEMA)} chars")
@@ -68,7 +70,8 @@ llm = OllamaLLM(
     model="phi3:mini",
     base_url=f"http://{ollama_host}:{ollama_port}",
     temperature=0.0,
-    num_predict=256,   # solo necesitamos el SQL, no texto largo
+    num_predict=256,
+    stop=["##", "Question:", "Note:", "Explanation:", "\n\n\n"],
 )
 
 
@@ -87,6 +90,19 @@ def extract_sql(raw: str) -> str:
     return raw.split(';')[0].strip() + ';'
 
 
+def clean_answer(raw: str) -> str:
+    """Corta la respuesta en el primer bloque de basura que genera phi3."""
+    # Parar en doble salto de línea (phi3 sigue inventando después)
+    if '\n\n' in raw:
+        raw = raw[:raw.index('\n\n')]
+    # Parar en señales de que phi3 empezó a alucinar
+    stop_signals = ['##', 'Question:', 'Note:', 'Explanation:', 'Example:', '```']
+    for signal in stop_signals:
+        if signal in raw:
+            raw = raw[:raw.index(signal)]
+    return raw.strip()
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 class Query(BaseModel):
     query: str
@@ -97,7 +113,7 @@ async def generate_sql(query: Query):
     print(f"\n{'='*50}")
     print(f"📥 Pregunta: {query.query}")
     try:
-        # Paso 1 — generar SQL (prompt corto para no saturar phi3)
+        # Paso 1 — generar SQL
         sql_prompt = (
             f"You are a MySQL expert. Write ONLY a valid MySQL SELECT query. "
             f"No explanations. No markdown. Just SQL.\n\n"
@@ -120,17 +136,17 @@ async def generate_sql(query: Query):
 
         print(f"📊 Filas: {len(rows)}")
 
-        # Paso 3 — interpretar (prompt mínimo)
+        # Paso 3 — interpretar
         interpret_prompt = (
-            f"Answer in Spanish, concise. Do not mention SQL.\n\n"
+            f"Answer in one sentence in Spanish. Do not ask questions. Do not add examples.\n\n"
             f"Question: {query.query}\n"
             f"Data: {rows[:10]}\n\n"
             f"Answer:"
         )
 
         print("🤖 Interpretando...")
-        answer = llm.invoke(interpret_prompt)
-        answer = answer.strip()
+        raw_answer = llm.invoke(interpret_prompt)
+        answer = clean_answer(raw_answer)
         print(f"💬 Respuesta: {answer}")
 
         return {"response": answer}
