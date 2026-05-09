@@ -9,4 +9,5 @@ COPY src/ ./src/
 
 EXPOSE 8080
 
+# Ajuste importante: apunta al módulo src.agent
 CMD ["uvicorn", "src.agent:app", "--host", "0.0.0.0", "--port", "8080"]
