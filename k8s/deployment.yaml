@@ -15,36 +15,38 @@ spec:
     spec:
       containers:
       - name: agent
-        image: ghcr.io/TU_USUARIO/ia/text2sql-agent:main   # Cambia TU_USUARIO
+        image: ghcr.io/vper1821-png/ia/text2sql-agent:main
         imagePullPolicy: Always
         ports:
         - containerPort: 8080
         env:
+        # Desde Secret db-credentials
         - name: MYSQL_HOST
           valueFrom:
-            configMapKeyRef:
-              name: text2sql-config
+            secretKeyRef:
+              name: db-credentials
               key: MYSQL_HOST
         - name: MYSQL_PORT
           valueFrom:
-            configMapKeyRef:
-              name: text2sql-config
+            secretKeyRef:
+              name: db-credentials
               key: MYSQL_PORT
         - name: MYSQL_DATABASE
           valueFrom:
-            configMapKeyRef:
-              name: text2sql-config
+            secretKeyRef:
+              name: db-credentials
               key: MYSQL_DATABASE
         - name: MYSQL_USER
           valueFrom:
-            configMapKeyRef:
-              name: text2sql-config
+            secretKeyRef:
+              name: db-credentials
               key: MYSQL_USER
         - name: MYSQL_PASSWORD
           valueFrom:
             secretKeyRef:
-              name: mysql-wms-secret
-              key: password
+              name: db-credentials
+              key: MYSQL_PASSWORD
+        # Desde ConfigMap
         - name: OLLAMA_HOST
           valueFrom:
             configMapKeyRef:
@@ -55,3 +57,13 @@ spec:
             configMapKeyRef:
               name: text2sql-config
               key: OLLAMA_PORT
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2"
+      # Si tu repositorio es privado, necesitas imagePullSecrets
+      # imagePullSecrets:
+      # - name: regcred
