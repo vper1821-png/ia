@@ -62,6 +62,14 @@ DB_KEYWORDS = [
 
 def is_db_question(question: str) -> bool:
     q = question.lower().strip()
+    # Ignorar prompts internos de Open WebUI (títulos, tags, seguimiento)
+    internal_prompts = [
+        "### task:", "suggest 3-5 relevant follow-up", "generate a concise",
+        "generate 1-3 broad tags", "follow_ups", "json format",
+        "title with an emoji", "chat history"
+    ]
+    if any(p in q for p in internal_prompts):
+        return False
     return any(kw in q for kw in DB_KEYWORDS)
 
 def get_relevant_tables(question: str) -> list:
@@ -114,37 +122,33 @@ except SQLAlchemyError as e:
     raise
 
 # ------------------------------------------------------------
-# 3. Configuración del LLM (más permisiva y determinista)
+# 3. Configuración del LLM (más capacidad para listados)
 # ------------------------------------------------------------
 llm = OllamaLLM(
     model=os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b"),
     base_url=f"http://{ollama_host}:{ollama_port}",
     temperature=0.0,
-    num_predict=512,
+    num_predict=1024,   # aumentado para respuestas largas
     top_k=1,
-    stop=None,   # quitamos stops para no truncar
+    stop=None,
 )
 
 # ------------------------------------------------------------
-# 4. Funciones de extracción y validación de SQL (mejoradas)
+# 4. Funciones de extracción y validación de SQL
 # ------------------------------------------------------------
 def extract_sql(raw: str) -> str:
-    """Extrae la PRIMERA sentencia SELECT válida, ignorando texto alrededor."""
+    """Extrae la PRIMERA sentencia SELECT válida."""
     raw = raw.strip()
-    # Eliminar bloques markdown
     raw = re.sub(r'```(?:sql)?\s*', '', raw, flags=re.IGNORECASE)
     raw = re.sub(r'```', '', raw).strip()
-    # Buscar SELECT ... hasta ; o fin de línea
     match = re.search(r'(SELECT\s+.*?)(;|\n\s*$)', raw, re.IGNORECASE | re.DOTALL)
     if match:
         sql = match.group(1).strip()
         if not sql.endswith(';'):
             sql += ';'
-        # Corregir duplicado "SELECT SELECT"
         if sql.upper().startswith('SELECT SELECT'):
-            sql = sql[7:]  # elimina el primer SELECT
+            sql = sql[7:]
         return sql
-    # Si no encuentra, buscar cualquier línea que empiece por SELECT
     for line in raw.splitlines():
         if re.match(r'(?i)^SELECT\b', line.strip()):
             sql = line.strip()
@@ -154,46 +158,41 @@ def extract_sql(raw: str) -> str:
     return ""
 
 def validate_sql(sql: str) -> bool:
-    """Valida que sea una consulta SELECT (sin restricciones excesivas)."""
     return bool(re.match(r'(?i)^\s*SELECT\b', sql.strip()))
 
 def fallback_sql(question: str) -> str:
-    """Genera una consulta SQL por defecto según la pregunta."""
     q = question.lower()
     if 'producto' in q:
-        if 'cuantos' in q or 'total' in q:
-            return "SELECT COUNT(*) FROM productos;"
-        return "SELECT * FROM productos LIMIT 10;"
+        return "SELECT * FROM productos ORDER BY id LIMIT 10;" if 'list' in q or 'muestra' in q else "SELECT COUNT(*) FROM productos;"
     if 'cliente' in q:
-        if 'cuantos' in q or 'total' in q:
-            return "SELECT COUNT(*) FROM clientes;"
-        return "SELECT * FROM clientes LIMIT 10;"
+        return "SELECT * FROM clientes ORDER BY id LIMIT 10;" if 'list' in q or 'muestra' in q else "SELECT COUNT(*) FROM clientes;"
     if 'proveedor' in q:
-        return "SELECT * FROM proveedores LIMIT 10;"
+        return "SELECT * FROM proveedores ORDER BY id LIMIT 10;"
     if 'chofer' in q:
-        return "SELECT * FROM choferes LIMIT 10;"
+        return "SELECT * FROM choferes ORDER BY id LIMIT 10;"
     if 'transportista' in q:
-        return "SELECT * FROM transportistas LIMIT 10;"
+        return "SELECT * FROM transportistas ORDER BY id LIMIT 10;"
     if 'stock' in q:
-        return "SELECT * FROM stock_wms LIMIT 10;"
+        return "SELECT * FROM stock_wms ORDER BY id LIMIT 10;"
     if 'pedido' in q or 'despacho' in q:
-        return "SELECT * FROM pedidos_despacho LIMIT 10;"
+        return "SELECT * FROM pedidos_despacho ORDER BY fecha DESC LIMIT 10;"
     if 'log' in q or 'api' in q:
         return "SELECT * FROM apis_logs ORDER BY fecha DESC LIMIT 10;"
-    # Si nada coincide, devuelve un mensaje amigable como consulta
     return "SELECT 'No se pudo generar la consulta automática' AS mensaje;"
 
 def get_sql_with_retry(llm_instance, schema: str, question: str, max_retries: int = 2) -> str:
-    """Intenta obtener SQL del LLM, reintentando si falla."""
-    # Prompt muy corto y directo, con ejemplos incrustados
     base_prompt = f"""Eres un generador de SQL para MySQL. Responde ÚNICAMENTE con la sentencia SQL SELECT que resuelva la pregunta.
 No añadas texto, explicaciones, comillas, markdown ni nada más.
+Si la pregunta pide un listado, incluye ORDER BY por la columna más lógica (ej. nombre, id o fecha). Usa LIMIT 10 si no se especifica la cantidad.
 Ejemplos:
 Pregunta: "cuantos productos tengo"
 SQL: SELECT COUNT(*) FROM productos;
 
 Pregunta: "muestra los primeros 5 clientes"
-SQL: SELECT * FROM clientes LIMIT 5;
+SQL: SELECT * FROM clientes ORDER BY id LIMIT 5;
+
+Pregunta: "listame los productos ordenados por nombre"
+SQL: SELECT * FROM productos ORDER BY nombre LIMIT 10;
 
 Esquema de tablas relevantes:
 {schema}
@@ -208,26 +207,61 @@ SQL:"""
         if sql and validate_sql(sql):
             return sql
         print(f"Intento {attempt+1} fallido. Reintentando...")
-        # Mensaje correctivo
         base_prompt = f"La respuesta anterior no fue una consulta SQL válida. Por favor, escribe solo la sentencia SELECT para: {question}\nSQL:"
     
     print("Usando fallback después de reintentos fallidos.")
     return fallback_sql(question)
 
-def clean_answer(raw: str) -> str:
-    """Limpia la respuesta final para que sea una frase corta."""
-    raw = raw.strip()
-    # Cortar en doble salto de línea o palabras clave
-    if '\n\n' in raw:
-        raw = raw[:raw.index('\n\n')]
-    stop_signals = ['##', 'Question:', 'Note:', 'Explanation:', 'Example:', '```']
-    for signal in stop_signals:
-        if signal in raw:
-            raw = raw[:raw.index(signal)]
-    return raw.strip()
+# ------------------------------------------------------------
+# 5. Nueva función para formatear y analizar resultados
+# ------------------------------------------------------------
+def format_and_analyze_results(question: str, rows: list) -> str:
+    total = len(rows)
+    if total == 0:
+        return "No se encontraron resultados para tu consulta."
+    
+    # Tomar una muestra (máximo 10 filas) para el análisis
+    sample = rows[:10]
+    # Construir un texto legible con la muestra
+    sample_text = ""
+    for i, row in enumerate(sample, 1):
+        # Extraer los valores más relevantes: si hay 'nombre' o 'descripcion' o la primera columna
+        if 'nombre_cliente' in row:
+            name = row.get('nombre_cliente', 'N/A')
+            rut = row.get('rut_cliente', '')
+            sample_text += f"{i}. {name} (RUT: {rut})\n"
+        elif 'nombre' in row:
+            name = row.get('nombre', 'N/A')
+            sample_text += f"{i}. {name}\n"
+        else:
+            # Mostrar el primer valor de la fila
+            first_val = list(row.values())[0] if row else ''
+            sample_text += f"{i}. {first_val}\n"
+    
+    prompt = f"""Eres un asistente de análisis de datos. A continuación tienes el resultado de una consulta a una base de datos.
+Pregunta original: {question}
+Número total de registros: {total}
+Muestra de los primeros {len(sample)} registros:
+{sample_text}
+
+Responde en español de forma clara y útil. Haz lo siguiente:
+1. Indica el número total de registros encontrados.
+2. Si es un listado, muestra los primeros (o últimos) registros de forma ordenada y legible, usando el formato de lista numerada.
+3. Proporciona un breve análisis: ¿qué se puede concluir de estos datos? (por ejemplo, el valor máximo, mínimo, tendencia, o simplemente que son los más recientes).
+4. Sé conciso pero informativo. No uses lenguaje vago.
+5. Si la pregunta pedía un listado, asegúrate de que la respuesta incluya los elementos concretos.
+
+Respuesta:"""
+    
+    try:
+        analysis = llm.invoke(prompt)
+        return analysis.strip()
+    except Exception as e:
+        # Fallback: respuesta manual
+        return f"Se encontraron {total} registros. Los primeros {len(sample)} son:\n{sample_text}"
 
 # ------------------------------------------------------------
-# 5. Endpoint principal
+# 6. Endpoint principal mejorado
 # ------------------------------------------------------------
 class Query(BaseModel):
     query: str
@@ -255,17 +289,8 @@ async def generate_sql(query: Query):
 
             print(f"Filas obtenidas: {len(rows)}")
 
-            # Interpretación de resultados
-            interpret_prompt = (
-                "Responde en una sola oración en español. "
-                "Muestra los valores y números reales de los datos proporcionados. "
-                "Sé específico. No seas vago.\n\n"
-                f"Pregunta: {query.query}\n"
-                f"Datos: {rows[:10]}\n\n"
-                "Respuesta:"
-            )
-            raw_answer = llm.invoke(interpret_prompt)
-            answer = clean_answer(raw_answer)
+            # Usar la nueva función de análisis
+            answer = format_and_analyze_results(query.query, rows)
             print(f"Respuesta: {answer}")
             return {"response": answer}
 
@@ -286,7 +311,10 @@ async def generate_sql(query: Query):
                 "Asistente:"
             )
             raw_answer = llm.invoke(chat_prompt)
-            answer = clean_answer(raw_answer)
+            # Limpieza básica
+            answer = re.sub(r'```.*?```', '', raw_answer, flags=re.DOTALL).strip()
+            if '\n\n' in answer:
+                answer = answer[:answer.index('\n\n')]
             print(f"Respuesta chat: {answer}")
             return {"response": answer}
         except Exception as e:
