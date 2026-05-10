@@ -27,7 +27,7 @@ ALL_TABLES = [
 
 # ── Mapa de keywords → tablas relevantes ─────────────────────────────────────
 TABLE_KEYWORDS = {
-    "productos":                  ["producto", "productos", "articulo", "item", "sku", "codigo_barras"],
+    "productos":                  ["producto", "productos", "articulo", "item", "sku", "seleciona", "selecciona"],
     "stock_wms":                  ["stock", "inventario", "disponible", "cantidad", "bodega"],
     "stock_reservas":             ["reserva", "reservas", "reservado"],
     "clientes":                   ["cliente", "clientes", "comprador"],
@@ -53,9 +53,9 @@ TABLE_KEYWORDS = {
 DB_KEYWORDS = [
     "cuanto", "cuantos", "cuanta", "cuantas",
     "stock", "api", "registro", "registros",
-    "total", "lista", "dame", "muestra", "muéstrame",
+    "total", "lista", "dame", "muestra", "muestrame",
     "hay", "tiene", "tienen", "existe", "existen",
-    "ultimo", "último", "primera", "primero",
+    "ultimo", "ultimo", "primera", "primero",
     "logs", "log", "apis_logs", "stock_wms",
     "consulta", "busca", "encuentra", "filtra",
     "mayor", "menor", "maximo", "minimo", "promedio",
@@ -66,6 +66,7 @@ DB_KEYWORDS = [
     "despacho", "recepcion", "picking", "preparacion",
     "reserva", "movimiento", "exportacion", "importacion",
     "tienda", "tiendas", "transportista",
+    "seleciona", "selecciona", "muestra", "listame",
 ]
 
 
@@ -74,14 +75,12 @@ def is_db_question(question: str) -> bool:
     return any(kw in q for kw in DB_KEYWORDS)
 
 
-def get_relevant_tables(question: str) -> list[str]:
-    """Selecciona tablas relevantes según keywords en la pregunta."""
+def get_relevant_tables(question: str) -> list:
     q = question.lower().strip()
     relevant = set()
     for table, keywords in TABLE_KEYWORDS.items():
         if any(kw in q for kw in keywords):
             relevant.add(table)
-    # Si no se detectó ninguna tabla, usar las más comunes
     if not relevant:
         relevant = {"productos", "stock_wms", "clientes", "pedidos_despacho", "apis_logs"}
     return list(relevant)
@@ -121,9 +120,9 @@ try:
     engine = create_engine(db_url, pool_pre_ping=True)
     with engine.connect() as conn:
         conn.execute(text("SELECT 1"))
-    print("✅ Conexión a BD exitosa.")
+    print("Conexion a BD exitosa.")
 except SQLAlchemyError as e:
-    print(f"❌ Error conectando a BD: {e}")
+    print(f"Error conectando a BD: {e}")
     raise
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
@@ -139,6 +138,11 @@ llm = OllamaLLM(
 def extract_sql(raw: str) -> str:
     raw = re.sub(r'```(?:sql)?', '', raw, flags=re.IGNORECASE)
     raw = re.sub(r'```', '', raw).strip()
+    # Si empieza con SELECT directamente (porque el prompt terminó en SELECT)
+    if re.match(r'(?i)^(SELECT|WITH)\b', raw):
+        if ';' in raw:
+            return raw[:raw.index(';') + 1].strip()
+        return raw.strip() + ';'
     for line in raw.splitlines():
         line = line.strip()
         if re.match(r'(?i)^(SELECT|WITH)\b', line):
@@ -148,6 +152,40 @@ def extract_sql(raw: str) -> str:
                 fragment = fragment[:fragment.index(';') + 1]
             return fragment.strip()
     return raw.split(';')[0].strip() + ';'
+
+
+def validate_sql(sql: str) -> tuple:
+    if not re.match(r'(?i)^\s*(SELECT|WITH)\b', sql):
+        return False, "No es una consulta SELECT valida"
+    if re.search(r'(?<![\'"]):\w+', sql):
+        return False, "Contiene bind parameters"
+    bad_words = ['document', 'write', 'here is', 'this query', 'the following']
+    sql_lower = sql.lower()
+    for word in bad_words:
+        if word in sql_lower[:50]:
+            return False, f"Contiene texto no SQL: {word}"
+    return True, ""
+
+
+def get_sql_with_retry(llm_instance, initial_prompt: str, schema: str, question: str, max_retries: int = 3) -> str:
+    prompt = initial_prompt
+    for attempt in range(max_retries):
+        raw_sql = llm_instance.invoke(prompt)
+        print(f"SQL crudo (intento {attempt+1}): {raw_sql}")
+        # El prompt termina en SELECT, agregar eso al inicio
+        sql = "SELECT " + extract_sql(raw_sql) if not re.match(r'(?i)^SELECT', raw_sql.strip()) else extract_sql(raw_sql)
+        valid, reason = validate_sql(sql)
+        if valid:
+            return sql
+        print(f"SQL invalido (intento {attempt+1}): {reason}")
+        prompt = (
+            f"MySQL 8.0 expert. Return ONLY a MySQL SELECT query. No text before or after.\n"
+            f"Rules: no bind parameters, no PostgreSQL syntax, use CAST() not ::, use LIMIT 10.\n"
+            f"Schema:\n{schema}\n\n"
+            f"Question: {question}\n\n"
+            f"SELECT"
+        )
+    raise ValueError(f"No se pudo generar SQL valido despues de {max_retries} intentos")
 
 
 def clean_answer(raw: str) -> str:
@@ -168,88 +206,83 @@ class Query(BaseModel):
 @app.post("/generate")
 async def generate_sql(query: Query):
     print(f"\n{'='*50}")
-    print(f"📥 Pregunta: {query.query}")
+    print(f"Pregunta: {query.query}")
 
     if is_db_question(query.query):
-        print("🗄️ Modo: consulta BD")
+        print("Modo: consulta BD")
         try:
-            # Seleccionar tablas relevantes dinámicamente
             relevant_tables = get_relevant_tables(query.query)
-            print(f"📋 Tablas relevantes: {relevant_tables}")
+            print(f"Tablas relevantes: {relevant_tables}")
 
-            db = SQLDatabase(engine, include_tables=relevant_tables)
-            schema = db.get_table_info(relevant_tables)
+            db_instance = SQLDatabase(engine, include_tables=relevant_tables)
+            schema = db_instance.get_table_info(relevant_tables)
 
-            # Paso 1 — generar SQL
             sql_prompt = (
-                f"You are a MySQL 8.0 expert. Write ONLY a valid MySQL 8.0 SELECT query.\n"
-                f"STRICT RULES:\n"
-                f"- Use only standard MySQL 8.0 syntax\n"
-                f"- Do NOT use PostgreSQL syntax\n"
-                f"- Do NOT use :: for casting, use CAST(value AS type) instead\n"
-                f"- Do NOT use POSITION...FOR syntax\n"
-                f"- Do NOT use ILIKE, use LIKE instead\n"
-                f"- Use LIMIT to avoid returning too many rows\n"
-                f"- No explanations, no markdown, no comments. Just the SQL query.\n\n"
+                "You are a MySQL 8.0 expert. Write ONLY a valid MySQL 8.0 SELECT query.\n"
+                "STRICT RULES:\n"
+                "- Use only standard MySQL 8.0 syntax\n"
+                "- Do NOT use PostgreSQL syntax\n"
+                "- Do NOT use :: for casting, use CAST(value AS type) instead\n"
+                "- Do NOT use POSITION...FOR syntax\n"
+                "- Do NOT use ILIKE, use LIKE instead\n"
+                "- Do NOT use bind parameters like :variable\n"
+                "- Use LIMIT 10 to avoid returning too many rows\n"
+                "- Start response directly with SELECT, no text before or after\n"
+                "- No explanations, no markdown, no comments. Just SQL.\n\n"
                 f"Schema:\n{schema}\n\n"
                 f"Question: {query.query}\n\n"
-                f"SQL:"
+                "SELECT"
             )
 
-            print("🤖 Generando SQL...")
-            raw_sql = llm.invoke(sql_prompt)
-            print(f"🔍 SQL crudo: {raw_sql}")
+            print("Generando SQL...")
+            sql = get_sql_with_retry(llm, sql_prompt, schema, query.query)
+            print(f"SQL final: {sql}")
 
-            sql = extract_sql(raw_sql)
-            print(f"✅ SQL: {sql}")
-
-            # Paso 2 — ejecutar SQL
             with engine.connect() as conn:
                 result = conn.execute(text(sql))
                 rows = [dict(r._mapping) for r in result]
 
-            print(f"📊 Filas: {len(rows)}")
+            print(f"Filas: {len(rows)}")
 
-            # Paso 3 — interpretar resultado
             interpret_prompt = (
-                f"Answer in one sentence in Spanish. "
-                f"Show the ACTUAL values and numbers from the data provided. "
-                f"Be specific and concrete. Do not be vague. "
-                f"Do not ask questions. Do not add examples.\n\n"
+                "Answer in one sentence in Spanish. "
+                "Show the ACTUAL values and numbers from the data provided. "
+                "Be specific and concrete. Do not be vague. "
+                "Do not ask questions. Do not add examples.\n\n"
                 f"Question: {query.query}\n"
                 f"Data: {rows[:10]}\n\n"
-                f"Answer:"
+                "Answer:"
             )
 
-            print("🤖 Interpretando...")
+            print("Interpretando...")
             raw_answer = llm.invoke(interpret_prompt)
             answer = clean_answer(raw_answer)
-            print(f"💬 Respuesta: {answer}")
+            print(f"Respuesta: {answer}")
 
             return {"response": answer}
 
         except SQLAlchemyError as e:
-            print(f"❌ SQL error: {e}")
+            print(f"SQL error: {e}")
             raise HTTPException(status_code=500, detail=f"Error SQL: {str(e)}")
         except Exception as e:
-            print(f"❌ Error: {e}")
+            print(f"Error: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
     else:
-        print("💬 Modo: conversación general")
+        print("Modo: conversacion general")
         try:
             chat_prompt = (
-                f"You are a helpful WMS assistant called 'Asistente WMS'. "
-                f"Answer naturally in Spanish. Be concise.\n\n"
+                "You are a helpful WMS assistant called 'Asistente WMS'. "
+                "Answer naturally in Spanish. Be concise.\n\n"
                 f"User: {query.query}\n\n"
-                f"Assistant:"
+                "Assistant:"
             )
             raw_answer = llm.invoke(chat_prompt)
             answer = clean_answer(raw_answer)
-            print(f"💬 Respuesta chat: {answer}")
+            print(f"Respuesta chat: {answer}")
             return {"response": answer}
         except Exception as e:
-            print(f"❌ Error chat: {e}")
+            print(f"Error chat: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
 
