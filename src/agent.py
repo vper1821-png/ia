@@ -127,7 +127,7 @@ except SQLAlchemyError as e:
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
 llm = OllamaLLM(
-    model=os.getenv("OLLAMA_MODEL", "phi3"),
+    model=os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b"),
     base_url=f"http://{ollama_host}:{ollama_port}",
     temperature=0.0,
     num_predict=256,
