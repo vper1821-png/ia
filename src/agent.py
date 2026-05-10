@@ -87,7 +87,7 @@ print(f"📏 Longitud schema: {len(SCHEMA)} chars")
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
 llm = OllamaLLM(
-    model="phi3:mini",
+    model="phi3",
     base_url=f"http://{ollama_host}:{ollama_port}",
     temperature=0.0,
     num_predict=256,
