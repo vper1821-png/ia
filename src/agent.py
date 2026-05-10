@@ -15,8 +15,39 @@ load_dotenv()
 
 app = FastAPI()
 
-# ── PRUEBA: solo 2 tablas ────────────────────────────────────────────────────
-TEST_TABLES = ["apis_logs", "stock_wms"]
+# ── Todas las tablas disponibles ─────────────────────────────────────────────
+ALL_TABLES = [
+    "productos", "stock_wms", "stock_reservas", "clientes", "cliente_direcciones",
+    "proveedores", "codigo_barras", "preparacion_kp", "preparacion_archivos",
+    "kp_recepcion", "kp_recepcion_archivos", "pedidos_despacho", "detalle_despacho",
+    "apis_logs", "apis_config", "inventario_movimientos", "inventario_movimientos_detalle",
+    "maestro_clientes", "maestro_tiendas", "empresas", "transportistas", "choferes",
+    "exportaciones_historial", "importaciones_historial", "oms_webhook_logs",
+]
+
+# ── Mapa de keywords → tablas relevantes ─────────────────────────────────────
+TABLE_KEYWORDS = {
+    "productos":                  ["producto", "productos", "articulo", "item", "sku", "codigo_barras"],
+    "stock_wms":                  ["stock", "inventario", "disponible", "cantidad", "bodega"],
+    "stock_reservas":             ["reserva", "reservas", "reservado"],
+    "clientes":                   ["cliente", "clientes", "comprador"],
+    "cliente_direcciones":        ["direccion", "direcciones", "domicilio"],
+    "proveedores":                 ["proveedor", "proveedores", "supplier"],
+    "preparacion_kp":             ["preparacion", "picking", "kp", "preparar"],
+    "pedidos_despacho":           ["pedido", "pedidos", "despacho", "despachos", "envio"],
+    "detalle_despacho":           ["detalle despacho", "items despacho"],
+    "apis_logs":                  ["api", "apis", "log", "logs", "llamada", "request"],
+    "apis_config":                ["config api", "configuracion api"],
+    "inventario_movimientos":     ["movimiento", "movimientos", "traslado", "entrada", "salida"],
+    "kp_recepcion":               ["recepcion", "recepciones", "recibido"],
+    "maestro_clientes":           ["falabella", "paris", "retail", "tienda", "maestro cliente"],
+    "maestro_tiendas":            ["tienda", "tiendas", "local", "sucursal"],
+    "exportaciones_historial":    ["exportacion", "exportaciones", "exportado"],
+    "importaciones_historial":    ["importacion", "importaciones", "importado"],
+    "transportistas":             ["transportista", "transporte", "carrier"],
+    "choferes":                   ["chofer", "choferes", "conductor"],
+    "oms_webhook_logs":           ["webhook", "oms"],
+}
 
 # ── Keywords que indican consulta a la BD ────────────────────────────────────
 DB_KEYWORDS = [
@@ -30,13 +61,30 @@ DB_KEYWORDS = [
     "mayor", "menor", "maximo", "minimo", "promedio",
     "contar", "listar", "mostrar", "trae", "traeme",
     "reciente", "recientes", "nuevos", "nuevo",
+    "producto", "productos", "cliente", "clientes",
+    "proveedor", "proveedores", "pedido", "pedidos",
+    "despacho", "recepcion", "picking", "preparacion",
+    "reserva", "movimiento", "exportacion", "importacion",
+    "tienda", "tiendas", "transportista",
 ]
 
 
 def is_db_question(question: str) -> bool:
-    """Determina si la pregunta requiere consultar la BD."""
     q = question.lower().strip()
     return any(kw in q for kw in DB_KEYWORDS)
+
+
+def get_relevant_tables(question: str) -> list[str]:
+    """Selecciona tablas relevantes según keywords en la pregunta."""
+    q = question.lower().strip()
+    relevant = set()
+    for table, keywords in TABLE_KEYWORDS.items():
+        if any(kw in q for kw in keywords):
+            relevant.add(table)
+    # Si no se detectó ninguna tabla, usar las más comunes
+    if not relevant:
+        relevant = {"productos", "stock_wms", "clientes", "pedidos_despacho", "apis_logs"}
+    return list(relevant)
 
 
 def clean_env_var(value: str, var_name: str) -> str:
@@ -78,16 +126,9 @@ except SQLAlchemyError as e:
     print(f"❌ Error conectando a BD: {e}")
     raise
 
-db = SQLDatabase(engine, include_tables=TEST_TABLES)
-
-# Schema fijo — se calcula una vez al arrancar
-SCHEMA = db.get_table_info(TEST_TABLES)
-print(f"📋 Schema cargado para tablas: {TEST_TABLES}")
-print(f"📏 Longitud schema: {len(SCHEMA)} chars")
-
 # ── LLM ──────────────────────────────────────────────────────────────────────
 llm = OllamaLLM(
-    model="phi3",
+    model=os.getenv("OLLAMA_MODEL", "phi3"),
     base_url=f"http://{ollama_host}:{ollama_port}",
     temperature=0.0,
     num_predict=256,
@@ -96,7 +137,6 @@ llm = OllamaLLM(
 
 
 def extract_sql(raw: str) -> str:
-    """Extrae la primera sentencia SQL del output del LLM."""
     raw = re.sub(r'```(?:sql)?', '', raw, flags=re.IGNORECASE)
     raw = re.sub(r'```', '', raw).strip()
     for line in raw.splitlines():
@@ -111,7 +151,6 @@ def extract_sql(raw: str) -> str:
 
 
 def clean_answer(raw: str) -> str:
-    """Corta la basura que genera phi3 después de la respuesta."""
     if '\n\n' in raw:
         raw = raw[:raw.index('\n\n')]
     stop_signals = ['##', 'Question:', 'Note:', 'Explanation:', 'Example:', '```']
@@ -131,15 +170,28 @@ async def generate_sql(query: Query):
     print(f"\n{'='*50}")
     print(f"📥 Pregunta: {query.query}")
 
-    # ── Consulta a la BD ──────────────────────────────────────────────────────
     if is_db_question(query.query):
         print("🗄️ Modo: consulta BD")
         try:
+            # Seleccionar tablas relevantes dinámicamente
+            relevant_tables = get_relevant_tables(query.query)
+            print(f"📋 Tablas relevantes: {relevant_tables}")
+
+            db = SQLDatabase(engine, include_tables=relevant_tables)
+            schema = db.get_table_info(relevant_tables)
+
             # Paso 1 — generar SQL
             sql_prompt = (
-                f"You are a MySQL expert. Write ONLY a valid MySQL SELECT query. "
-                f"No explanations. No markdown. Just SQL.\n\n"
-                f"Schema:\n{SCHEMA}\n\n"
+                f"You are a MySQL 8.0 expert. Write ONLY a valid MySQL 8.0 SELECT query.\n"
+                f"STRICT RULES:\n"
+                f"- Use only standard MySQL 8.0 syntax\n"
+                f"- Do NOT use PostgreSQL syntax\n"
+                f"- Do NOT use :: for casting, use CAST(value AS type) instead\n"
+                f"- Do NOT use POSITION...FOR syntax\n"
+                f"- Do NOT use ILIKE, use LIKE instead\n"
+                f"- Use LIMIT to avoid returning too many rows\n"
+                f"- No explanations, no markdown, no comments. Just the SQL query.\n\n"
+                f"Schema:\n{schema}\n\n"
                 f"Question: {query.query}\n\n"
                 f"SQL:"
             )
@@ -160,7 +212,10 @@ async def generate_sql(query: Query):
 
             # Paso 3 — interpretar resultado
             interpret_prompt = (
-                f"Answer in one sentence in Spanish. Do not ask questions. Do not add examples.\n\n"
+                f"Answer in one sentence in Spanish. "
+                f"Show the ACTUAL values and numbers from the data provided. "
+                f"Be specific and concrete. Do not be vague. "
+                f"Do not ask questions. Do not add examples.\n\n"
                 f"Question: {query.query}\n"
                 f"Data: {rows[:10]}\n\n"
                 f"Answer:"
@@ -180,7 +235,6 @@ async def generate_sql(query: Query):
             print(f"❌ Error: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
-    # ── Conversación general — phi3 responde directamente ────────────────────
     else:
         print("💬 Modo: conversación general")
         try:
@@ -201,7 +255,7 @@ async def generate_sql(query: Query):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "tables": TEST_TABLES}
+    return {"status": "ok", "tables": ALL_TABLES}
 
 
 if __name__ == "__main__":
